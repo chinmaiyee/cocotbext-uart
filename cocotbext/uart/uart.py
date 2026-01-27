@@ -27,17 +27,19 @@ import logging
 import cocotb
 from cocotb.queue import Queue
 from cocotb.triggers import FallingEdge, Timer, First, Event
+from enum import Enum
 
 from .version import __version__
-
+UartParity = Enum("UartParity", "NONE EVEN ODD MARK SPACE")
 
 class UartSource:
-    def __init__(self, data, baud=9600, bits=8, stop_bits=1, *args, **kwargs):
+    def __init__(self, data, baud=9600, bits=8, stop_bits=1,parity=None, *args, **kwargs):
         self.log = logging.getLogger(f"cocotb.{data._path}")
         self._data = data
         self._baud = baud
         self._bits = bits
         self._stop_bits = stop_bits
+        self._parity = parity #parity added
 
         self.log.info("UART source")
         self.log.info("cocotbext-uart version %s", __version__)
@@ -73,7 +75,7 @@ class UartSource:
 
     @baud.setter
     def baud(self, value):
-        self.baud = value
+        self._baud = value
         self._restart()
 
     @property
@@ -82,7 +84,7 @@ class UartSource:
 
     @bits.setter
     def bits(self, value):
-        self.bits = value
+        self._bits = value
         self._restart()
 
     @property
@@ -91,7 +93,16 @@ class UartSource:
 
     @stop_bits.setter
     def stop_bits(self, value):
-        self.stop_bits = value
+        self._stop_bits = value
+        self._restart()
+
+    @property
+    def parity(self):
+        return self._parity
+        
+    @parity.setter
+    def parity(self, value):
+        self._parity = value
         self._restart()
 
     async def write(self, data):
@@ -139,27 +150,39 @@ class UartSource:
             # start bit
             data.value = 0
             await bit_t
-
+            ones=0
             # data bits
             for k in range(self.bits):
                 data.value = b & 1
+                if data.value == 1:
+                    ones+=1
                 b >>= 1
                 await bit_t
-
+            if self._parity == UartParity.ODD:
+                if ones%2 != 0:
+                    data.value = 0
+                else:
+                    data.value = 1
+                await bit_t
+            elif self._parity == UartParity.EVEN:
+                if ones%2 == 0:
+                    data.value = 0
+                else:
+                    data.value = 1
+                await bit_t
             # stop bit
             data.value = 1
             await stop_bit_t
 
-
 class UartSink:
 
-    def __init__(self, data, baud=9600, bits=8, stop_bits=1, *args, **kwargs):
+    def __init__(self, data, baud=9600, bits=8, stop_bits=1,parity=None, *args, **kwargs): #changed
         self.log = logging.getLogger(f"cocotb.{data._path}")
         self._data = data
         self._baud = baud
         self._bits = bits
         self._stop_bits = stop_bits
-
+        self._parity = parity #parity added
         self.log.info("UART sink")
         self.log.info("cocotbext-uart version %s", __version__)
         self.log.info("Copyright (c) 2020-2025 Alex Forencich")
@@ -182,7 +205,7 @@ class UartSink:
     def _restart(self):
         if self._run_cr is not None:
             self._run_cr.kill()
-        self._run_cr = cocotb.start_soon(self._run(self._data, self._baud, self._bits, self._stop_bits))
+        self._run_cr = cocotb.start_soon(self._run(self._data, self._baud, self._bits, self._stop_bits,self._parity))
 
     @property
     def baud(self):
@@ -190,7 +213,7 @@ class UartSink:
 
     @baud.setter
     def baud(self, value):
-        self.baud = value
+        self._baud = value
         self._restart()
 
     @property
@@ -199,7 +222,7 @@ class UartSink:
 
     @bits.setter
     def bits(self, value):
-        self.bits = value
+        self._bits = value
         self._restart()
 
     @property
@@ -208,7 +231,7 @@ class UartSink:
 
     @stop_bits.setter
     def stop_bits(self, value):
-        self.stop_bits = value
+        self._stop_bits = value
         self._restart()
 
     async def read(self, count=-1):
@@ -220,7 +243,7 @@ class UartSink:
     def read_nowait(self, count=-1):
         if count < 0:
             count = self.queue.qsize()
-        if self.bits == 8:
+        if self.bits >= 8:
             data = bytearray()
         else:
             data = []
@@ -250,7 +273,7 @@ class UartSink:
         else:
             await self.sync.wait()
 
-    async def _run(self, data, baud, bits, stop_bits):
+    async def _run(self, data, baud, bits, stop_bits, parity):
         self.active = False
 
         half_bit_t = Timer(int(1e9/self.baud/2), 'ns')
@@ -264,18 +287,39 @@ class UartSink:
 
             # start bit
             await half_bit_t
-
             # data bits
             b = 0
+            ones=0
             for k in range(bits):
                 await bit_t
-                b |= bool(int(data.value)) << k
+                #b |= bool(int(data.value)) << k
+                bit=int(data.value)
+                b |= bit << k
+                ones+=bit
+            # parity bit (if enabled)
+            if parity is not None:
+                await bit_t
+                rx_parity = int(data.value)
+                if parity == UartParity.EVEN:
+                    exp = ones % 2
+                elif parity == UartParity.ODD:
+                    exp = (ones + 1) % 2
+                elif parity == UartParity.MARK:
+                    exp = 1
+                else:
+                    exp = None  # NONE or unsupported
+
+            if exp is not None and rx_parity != exp:
+                self.log.error(
+                    "Parity error (%s): rx=%d exp=%d byte=0x%02x",
+                    parity.name, rx_parity, exp, b)
+                self.active = False
+                continue   # drop byte
 
             # stop bit
             await stop_bit_t
 
             self.log.info("Read byte 0x%02x", b)
-
             self.queue.put_nowait(b)
             self.sync.set()
 
