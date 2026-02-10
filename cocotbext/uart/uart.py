@@ -26,15 +26,22 @@ import logging
 
 import cocotb
 from cocotb.queue import Queue
-from cocotb.triggers import FallingEdge, Timer, First, Event
+from cocotb.triggers import RisingEdge,FallingEdge, Timer, First, Event
 from enum import Enum
 
 from .version import __version__
-UartParity = Enum("UartParity", "NONE EVEN ODD MARK SPACE")
+class UartParity(Enum):
+    NONE = 0
+    ODD = 1
+    EVEN = 2
+    MARK = 3
+    SPACE = 4
 
 class UartSource:
-    def __init__(self, data, baud=9600, bits=8, stop_bits=1,parity=None, *args, **kwargs):
+    def __init__(self,clk,clk_freq, data, baud=9600, bits=8, stop_bits=1,parity=None, *args, **kwargs):
         self.log = logging.getLogger(f"cocotb.{data._path}")
+        self._clk = clk
+        self._clk_freq = clk_freq
         self._data = data
         self._baud = baud
         self._bits = bits
@@ -133,10 +140,10 @@ class UartSource:
 
     async def _run(self, data, baud, bits, stop_bits):
         self.active = False
-
-        bit_t = Timer(int(1e9/self.baud), 'ns')
-        stop_bit_t = Timer(int(1e9/self.baud*stop_bits), 'ns')
-
+        # bit_t = int(1e9/self.baud)
+        # stop_bit_t = int(1e9/self.baud*stop_bits)
+        bit_cycles = round(self._clk_freq / baud)
+        stop_cycles = round(bit_cycles * stop_bits)
         while True:
             if self.empty():
                 self.active = False
@@ -146,34 +153,47 @@ class UartSource:
             self.active = True
 
             self.log.info("Write byte 0x%02x", b)
-
+            for _ in range(bit_cycles):
+                await RisingEdge(self._clk)
             # start bit
             data.value = 0
-            await bit_t
+            #await bit_t
+            for _ in range(bit_cycles):
+                await RisingEdge(self._clk)
             ones=0
             # data bits
             for k in range(self.bits):
-                data.value = b & 1
-                if data.value == 1:
+                val = b & 1
+                data.value = val
+                if val == 1:
                     ones+=1
                 b >>= 1
-                await bit_t
+                #await bit_t
+                for _ in range(bit_cycles):
+                    await RisingEdge(self._clk)
             if self._parity == UartParity.ODD:
                 if ones%2 != 0:
                     data.value = 0
                 else:
                     data.value = 1
-                await bit_t
+                #await bit_t
+                for _ in range(bit_cycles):
+                    await RisingEdge(self._clk)
             elif self._parity == UartParity.EVEN:
                 if ones%2 == 0:
                     data.value = 0
                 else:
                     data.value = 1
-                await bit_t
+                #await bit_t
+                for _ in range(bit_cycles):
+                    await RisingEdge(self._clk)
             # stop bit
             data.value = 1
-            await stop_bit_t
-
+            #await stop_bit_t
+            for _ in range(stop_cycles):
+                await RisingEdge(self._clk)
+            for _ in range(bit_cycles * 2):
+                    await RisingEdge(self._clk)
 class UartSink:
 
     def __init__(self, data, baud=9600, bits=8, stop_bits=1,parity=None, *args, **kwargs): #changed
@@ -306,9 +326,7 @@ class UartSink:
                     exp = (ones + 1) % 2
                 elif parity == UartParity.MARK:
                     exp = 1
-                else:
-                    exp = None  # NONE or unsupported
-
+               
             if exp is not None and rx_parity != exp:
                 self.log.error(
                     "Parity error (%s): rx=%d exp=%d byte=0x%02x",
