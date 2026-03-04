@@ -34,8 +34,6 @@ class UartParity(Enum):
     NONE = 0
     ODD = 1
     EVEN = 2
-    MARK = 3
-    SPACE = 4
 
 class UartSource:
     def __init__(self,clk,clk_freq, data, baud=9600, bits=8, stop_bits=1,parity=None, *args, **kwargs):
@@ -310,6 +308,8 @@ class UartSink:
             # data bits
             b = 0
             ones=0
+            exp=None
+            rx_parity=None
             for k in range(bits):
                 await bit_t
                 #b |= bool(int(data.value)) << k
@@ -324,8 +324,6 @@ class UartSink:
                     exp = ones % 2
                 elif parity == UartParity.ODD:
                     exp = (ones + 1) % 2
-                elif parity == UartParity.MARK:
-                    exp = 1
                
             if exp is not None and rx_parity != exp:
                 self.log.error(
